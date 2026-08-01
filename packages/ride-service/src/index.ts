@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, TABLES, verifyToken, type Ride } from '@uber-clone/shared';
+import { ddb, TABLES, redis, REDIS_KEYS, verifyToken, type Ride } from '@uber-clone/shared';
 import { estimateFare } from './fare';
 
 const app = Fastify({ logger: true });
@@ -102,6 +102,11 @@ app.patch<{
     };
 
     await ddb.send(new PutCommand({ TableName: TABLES.RIDES, Item: ride }));
+
+    // Hand off to matching-service via the Ride Request Queue instead of
+    // calling it directly - decouples ride creation from the matching
+    // loop, which can take several seconds per candidate driver.
+    await redis.lpush(REDIS_KEYS.RIDE_REQUEST_QUEUE, ride.id);
 
     return { ...ride, fareChanged };
   },

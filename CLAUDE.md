@@ -46,6 +46,9 @@ Adapted from a "Design Uber" system design interview breakdown.
 - `POST /location/update` → `Authorization: Bearer <token>` + `{ lat, long }` → `{ driverId, lat, long }`
   (`driverId` comes from the verified token, same pattern as `/ride/request`;
   GEOADDs into Redis's `driver-locations` key, no DynamoDB involved)
+- `GET /location/nearby-drivers?lat=&long=&radiusKm=` → `{ driverIds: string[] }`
+  (no auth - read-only, called internally by `matching-service`, not scoped
+  to any particular user's identity; GEOSEARCH, nearest-first)
 - `PATCH /ride/driver/accept` → `{ rideId, accept: boolean }`
 - `PATCH /ride/driver/update` → `{ rideId, status: 'pickedup' | 'droppedoff' }`
 
@@ -129,11 +132,30 @@ Done:
    location - no consumer needs staleness filtering yet, so this is
    deferred to `matching-service`, likely via a companion per-driver key
    with its own TTL.
+5. `packages/matching-service` — **first slice only**, not the full
+   matching flow. `ride-service` now `LPUSH`es a `rideId` onto Redis's
+   `ride-request-queue` after creating a `Ride` (the "Ride Request Queue"
+   from the architecture doc - decouples ride creation from matching).
+   `matching-service` is a background worker (no HTTP server yet, nothing
+   calls it) that `BRPOP`s that queue, calls `location-service`'s new
+   `GET /location/nearby-drivers` (GEOSEARCH), filters candidates to
+   `status === 'available'`, and attempts an atomic
+   `SET driver-lock:<driverId> <rideId> NX EX 10` on the first available
+   one. Stops there - just proves queue → search → availability → lock
+   works. Explicitly NOT built yet: sending a real notification, waiting
+   for accept/decline, retrying the next candidate on timeout/decline,
+   and updating `Ride`/`Driver` status on a match.
 
 ## Immediate next steps (in order)
 
-1. `matching-service` + the TTL driver-lock consistency logic (and the
-   driver-location-staleness question flagged above).
+1. The rest of `matching-service`: `PATCH /ride/driver/accept` (which
+   service owns it - probably `matching-service`, since it holds the
+   lock), how an accept reaches the *waiting* matching loop (a blocking
+   10s wait inside a request handler doesn't fit Node's model well -
+   likely polling or an in-process event emitter keyed by `rideId`),
+   retry-next-candidate on decline/timeout, and updating
+   `Ride.status → 'matched'` / `Driver.status → 'in_ride'` on success.
+   The driver-location-staleness question flagged above belongs here too.
 2. `notification-service` (can likely stay a stub/log for a while).
 
 Confirm scope with me before jumping ahead of step in progress.

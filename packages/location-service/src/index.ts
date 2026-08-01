@@ -52,6 +52,48 @@ app.post<{ Body: { lat: number; long: number } }>(
   },
 );
 
+const DEFAULT_RADIUS_KM = 5;
+
+// No auth here, unlike /location/update - this is a read-only query with
+// no effect on any specific rider/driver's data, called internally by
+// matching-service rather than a client acting as a particular user.
+app.get<{ Querystring: { lat: number; long: number; radiusKm?: number } }>(
+  '/location/nearby-drivers',
+  {
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['lat', 'long'],
+        properties: {
+          lat: { type: 'number' },
+          long: { type: 'number' },
+          radiusKm: { type: 'number' },
+        },
+      },
+    },
+  },
+  async (request) => {
+    const { lat, long, radiusKm = DEFAULT_RADIUS_KM } = request.query;
+
+    // GEOSEARCH turns "who's within N km of this point" into a range scan
+    // over the geohash score GEOADD stored, instead of computing distance
+    // against every driver one by one. ASC sorts nearest-first, so
+    // matching-service can just try candidates in the order returned.
+    const driverIds = await redis.geosearch(
+      REDIS_KEYS.DRIVER_LOCATIONS,
+      'FROMLONLAT',
+      long,
+      lat,
+      'BYRADIUS',
+      radiusKm,
+      'km',
+      'ASC',
+    );
+
+    return { driverIds };
+  },
+);
+
 const port = Number(process.env.PORT ?? 3003);
 
 app.listen({ port }).catch((err) => {

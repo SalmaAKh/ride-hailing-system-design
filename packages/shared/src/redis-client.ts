@@ -10,4 +10,12 @@ export const REDIS_KEYS = {
   // driverId. GEOSEARCH-style radius queries need every candidate in one
   // key - there's no way to search "nearby" across scattered per-driver keys.
   DRIVER_LOCATIONS: 'driver-locations',
+  // The "Ride Request Queue" from the architecture doc - ride-service
+  // LPUSHes a rideId here after creating a Ride; matching-service BRPOPs
+  // it, decoupling ride creation from the (potentially slow) matching loop.
+  RIDE_REQUEST_QUEUE: 'ride-request-queue',
 } as const;
+
+// Prefix for per-driver TTL locks (SET NX EX) that stop the same driver
+// getting offered two rides at once during matching.
+export const driverLockKey = (driverId: string) => `driver-lock:${driverId}`;
