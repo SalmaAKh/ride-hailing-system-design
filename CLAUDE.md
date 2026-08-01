@@ -29,9 +29,20 @@ Adapted from a "Design Uber" system design interview breakdown.
 **Core entities:** Rider, Driver, Ride, Location (see
 `packages/shared/src/types.ts` for the actual TS shapes).
 
-**API surface (from the original design):**
-- `POST /ride/fare-estimate` → `{ source, destination }` → `Partial<Ride>`
-- `PATCH /ride/request` → `{ rideId }` → `200`
+**API surface (from the original design, as implemented so far):**
+- `POST /auth/register` → `{ name, email, phone, password }` → `{ token, profileId, role: 'rider' }`
+  (rider self-registration only - drivers aren't self-serve, since onboarding
+  one needs vetting a public API can't do; driver accounts are created via
+  the seed script for now, with a real driver registration/verification
+  flow as its own later story)
+- `POST /auth/login` → `{ email, password }` → `{ token, profileId, role }`
+  (works for any role already in `Users` - not rider-only, since login
+  itself doesn't grant anything, it just authenticates an existing account)
+- `POST /ride/fare-estimate` → `{ source, destination }` → `Partial<Ride>` (pure calculation, no persistence)
+- `PATCH /ride/request` → `Authorization: Bearer <token>` + `{ source, destination, fare }` → created `Ride` + `{ fareChanged }`
+  (deviates from the original `{ rideId } → 200` spec — `riderId` comes from
+  the verified token, never the body; fare is recomputed server-side and
+  `fareChanged` flags if it differs from the quoted value)
 - `POST /location/update` → `{ lat, long }`
 - `PATCH /ride/driver/accept` → `{ rideId, accept: boolean }`
 - `PATCH /ride/driver/update` → `{ rideId, status: 'pickedup' | 'droppedoff' }`
@@ -69,6 +80,19 @@ never in DynamoDB.
   flagged as new/unfamiliar, so explain these commands when first used)
   and per-driver TTL locks (used by the matching loop to guarantee a
   driver is never sent two ride requests at once).
+- **Auth**: a `Users` table (PK: `email`, since that's the login lookup)
+  holds credentials, separate from the `Riders`/`Drivers` profile tables —
+  keeps password hashes away from anywhere a Rider/Driver object gets
+  returned. Each `Users` row carries a `profileId` (the corresponding
+  Rider/Driver id) so login needs one `GetItem`, not a second lookup;
+  `Riders`/`Drivers` rows carry a `userId` back-reference. This was added
+  deliberately as two ids per person (not one shared id) so one person
+  being both a rider and a driver — a real thing in Uber's actual product
+  — doesn't require a schema migration later. Passwords are hashed with
+  Node's built-in `scrypt` (no extra dependency for something this
+  security-sensitive); tokens are signed JWTs (`jsonwebtoken`) verified by
+  any service via a shared helper in `@uber-clone/shared`, so every service
+  checks identity the same way instead of re-implementing it.
 
 ## Current state
 
@@ -79,20 +103,28 @@ occupy `6379` and `6380` — Node code connecting from the host must use
 `6381`; containers connecting to Redis over the Docker network (e.g.
 RedisInsight) use the internal `redis:6379`.
 
-Nothing else exists yet — no seed data, no services beyond local infra.
+Done:
+1. Seed script (`scripts/seed.ts`) — inserts one rider + one driver by hand,
+   confirmed visible in the DynamoDB admin GUI.
+2. `packages/ride-service` — `POST /ride/fare-estimate` (pure calculation,
+   Haversine distance × rate, no persistence) and `PATCH /ride/request`
+   (creates the real `Ride` row; requires a verified rider token).
+3. `packages/auth-service` — `POST /auth/register` (rider self-service
+   only — drivers can't self-register, since onboarding one needs vetting
+   a public API can't do; driver accounts are created via the seed script
+   for now) and `POST /auth/login` (works for any role already in `Users`).
+   Inserted ahead of schedule once `/ride/request` needed a real `riderId`
+   instead of a hardcoded placeholder. Schema is normalized: `Users` (PK
+   `email`, GSI `UserIdIndex` on `id`) holds everything common to both
+   roles - `name`, `email`, `phone`, credentials; `Riders`/`Drivers` hold
+   only `userId` + role-specific fields (`paymentMethods` /
+   `vehicle`+`status`) + their own `createdAt`.
 
 ## Immediate next steps (in order)
 
-1. A small seed script to insert one rider + one driver by hand, so we can
-   confirm real items show up correctly in the DynamoDB admin GUI.
-2. `packages/ride-service`: Fastify service implementing
-   `POST /ride/fare-estimate` first (simplest possible fare calc — e.g.
-   straight-line distance × rate — no real mapping API yet) and
-   `PATCH /ride/request` next. This is the first real DynamoDB read/write
-   wiring through a service.
-3. `location-service` + Redis GEO usage (the geohashing lesson).
-4. `matching-service` + the TTL driver-lock consistency logic.
-5. `notification-service` (can likely stay a stub/log for a while).
+1. `location-service` + Redis GEO usage (the geohashing lesson).
+2. `matching-service` + the TTL driver-lock consistency logic.
+3. `notification-service` (can likely stay a stub/log for a while).
 
 Confirm scope with me before jumping ahead of step in progress.
 

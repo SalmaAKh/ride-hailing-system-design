@@ -3,45 +3,74 @@
  * real items round-trip correctly through the DynamoDB admin GUI before
  * any service code exists.
  *
- * Uses the shared DocumentClient (`ddb`) and table names (`TABLES`) from
- * @uber-clone/shared instead of a raw DynamoDBClient — the DocumentClient
- * lets us pass plain JS objects (matching the Rider/Driver interfaces
- * directly) instead of hand-writing DynamoDB's { S: 'foo' } attribute
- * format.
+ * Each person is a Users row (credentials + name/email/phone) plus a
+ * Riders/Drivers row (userId + role-specific fields only), mirroring
+ * exactly what auth-service's real /auth/register does - just as two
+ * plain PutCommands instead of a transaction, since this is hand-seeded
+ * data for local testing, not a path real users go through.
  *
  * Run with: npm run seed
  */
 import { randomUUID } from 'node:crypto';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, TABLES, type Rider, type Driver } from '@uber-clone/shared';
+import { ddb, TABLES, hashPassword, type User, type Rider, type Driver } from '@uber-clone/shared';
+
+const SEED_PASSWORD = 'seed-password-123'; // local test data only
 
 async function main() {
-  const rider: Rider = {
-    id: randomUUID(),
-    name: 'Salma Khater',
+  const passwordHash = await hashPassword(SEED_PASSWORD);
+  const now = new Date().toISOString();
+
+  const riderUserId = randomUUID();
+  const riderId = randomUUID();
+
+  const riderUser: User = {
+    id: riderUserId,
     email: 'salmamcu@gmail.com',
+    name: 'Salma Khater',
     phone: '+1-555-0100',
-    paymentMethods: [
-      { id: randomUUID(), type: 'card', last4: '4242', isDefault: true },
-    ],
-    createdAt: new Date().toISOString(),
+    passwordHash,
+    role: 'rider',
+    profileId: riderId,
+    createdAt: now,
+  };
+
+  const rider: Rider = {
+    id: riderId,
+    userId: riderUserId,
+    paymentMethods: [{ id: randomUUID(), type: 'card', last4: '4242', isDefault: true }],
+    createdAt: now,
+  };
+
+  const driverUserId = randomUUID();
+  const driverId = randomUUID();
+
+  const driverUser: User = {
+    id: driverUserId,
+    email: 'jordan.reyes@example.com',
+    name: 'Jordan Reyes',
+    phone: '+1-555-0200',
+    passwordHash,
+    role: 'driver',
+    profileId: driverId,
+    createdAt: now,
   };
 
   const driver: Driver = {
-    id: randomUUID(),
-    name: 'Jordan Reyes',
-    email: 'jordan.reyes@example.com',
-    phone: '+1-555-0200',
+    id: driverId,
+    userId: driverUserId,
     vehicle: { make: 'Toyota', model: 'Camry', year: 2021, plate: 'ABC-1234' },
     status: 'available',
-    createdAt: new Date().toISOString(),
+    createdAt: now,
   };
 
+  await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: riderUser }));
   await ddb.send(new PutCommand({ TableName: TABLES.RIDERS, Item: rider }));
-  console.log(`✅ seeded rider: ${rider.id} (${rider.name})`);
+  console.log(`✅ seeded rider: ${rider.id} (${riderUser.name})`);
 
+  await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: driverUser }));
   await ddb.send(new PutCommand({ TableName: TABLES.DRIVERS, Item: driver }));
-  console.log(`✅ seeded driver: ${driver.id} (${driver.name})`);
+  console.log(`✅ seeded driver: ${driver.id} (${driverUser.name})`);
 }
 
 main().catch((err) => {

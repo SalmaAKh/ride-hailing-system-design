@@ -22,6 +22,7 @@ export const TABLES = {
   RIDERS: 'Riders',
   DRIVERS: 'Drivers',
   RIDES: 'Rides',
+  USERS: 'Users',
 } as const;
 
 export const RIDES_DRIVER_ID_INDEX = 'DriverIdIndex';

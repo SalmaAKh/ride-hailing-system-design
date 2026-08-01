@@ -16,11 +16,9 @@ export interface PaymentMethod {
 
 export interface Rider {
   id: string;
-  name: string;
-  email: string;
-  phone: string;
+  userId: string; // -> User.id, the source of truth for name/email/phone/credentials
   paymentMethods: PaymentMethod[];
-  createdAt: string; // ISO timestamp
+  createdAt: string; // ISO timestamp - when this rider profile was created
 }
 
 export type DriverStatus = 'available' | 'in_ride' | 'offline';
@@ -34,12 +32,25 @@ export interface Vehicle {
 
 export interface Driver {
   id: string;
-  name: string;
-  email: string;
-  phone: string;
+  userId: string; // -> User.id, the source of truth for name/email/phone/credentials
   vehicle: Vehicle;
   status: DriverStatus;
-  createdAt: string; // ISO timestamp
+  createdAt: string; // ISO timestamp - when this driver profile was created
+}
+
+// ---- Auth ----
+
+export type UserRole = 'rider' | 'driver';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  phone: string;
+  passwordHash: string;
+  role: UserRole;
+  profileId: string; // Rider.id or Driver.id, depending on role
+  createdAt: string; // when the account itself was created
 }
 
 export type RideStatus =

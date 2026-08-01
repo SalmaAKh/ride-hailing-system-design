@@ -10,6 +10,10 @@
  *   Rides   -> PK: id                     (get ride by id)
  *              GSI DriverIdIndex          (get rides for a driver, newest first)
  *              GSI RiderIdIndex           (get rides for a rider, newest first)
+ *   Users   -> PK: email                  (look up credentials at login)
+ *              GSI UserIdIndex            (resolve a Rider/Driver's userId
+ *                                           back to name/email/phone, e.g.
+ *                                           for "my profile" or notifications)
  *
  * Run with: npm run create-tables
  */
@@ -87,6 +91,23 @@ async function main() {
           { AttributeName: 'riderId', KeyType: 'HASH' },
           { AttributeName: 'createdAt', KeyType: 'RANGE' },
         ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+    ],
+  });
+
+  await createTable({
+    TableName: 'Users',
+    BillingMode: 'PAY_PER_REQUEST',
+    AttributeDefinitions: [
+      { AttributeName: 'email', AttributeType: ScalarAttributeType.S },
+      { AttributeName: 'id', AttributeType: ScalarAttributeType.S },
+    ],
+    KeySchema: [{ AttributeName: 'email', KeyType: 'HASH' }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: 'UserIdIndex',
+        KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
         Projection: { ProjectionType: 'ALL' },
       },
     ],

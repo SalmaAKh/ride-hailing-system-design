@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, TABLES, type Ride } from '@uber-clone/shared';
+import { ddb, TABLES, verifyToken, type Ride } from '@uber-clone/shared';
 import { estimateFare } from './fare';
 
 const app = Fastify({ logger: true });
@@ -44,20 +44,16 @@ app.post<{ Body: { source: Ride['source']; destination: Ride['destination'] } }>
   },
 );
 
-// riderId is passed directly in the body as a stand-in for real auth,
-// which doesn't exist yet - see CLAUDE.md. Revisit once there's a login
-// flow to pull this from a session instead.
 app.patch<{
-  Body: { riderId: string; source: Ride['source']; destination: Ride['destination']; fare: number };
+  Body: { source: Ride['source']; destination: Ride['destination']; fare: number };
 }>(
   '/ride/request',
   {
     schema: {
       body: {
         type: 'object',
-        required: ['riderId', 'source', 'destination', 'fare'],
+        required: ['source', 'destination', 'fare'],
         properties: {
-          riderId: { type: 'string' },
           source: coordinatesSchema,
           destination: coordinatesSchema,
           fare: { type: 'number' },
@@ -65,8 +61,27 @@ app.patch<{
       },
     },
   },
-  async (request): Promise<Ride & { fareChanged: boolean }> => {
-    const { riderId, source, destination, fare: quotedFare } = request.body;
+  async (request, reply) => {
+    // riderId comes from a verified token, never from the request body -
+    // otherwise any client could request a ride "as" any rider just by
+    // naming their id. auth-service issues this token at login.
+    const authHeader = request.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return reply.status(401).send({ error: 'missing or malformed Authorization header' });
+    }
+
+    let payload;
+    try {
+      payload = verifyToken(authHeader.slice('Bearer '.length));
+    } catch {
+      return reply.status(401).send({ error: 'invalid or expired token' });
+    }
+
+    if (payload.role !== 'rider') {
+      return reply.status(403).send({ error: 'only riders can request rides' });
+    }
+
+    const { source, destination, fare: quotedFare } = request.body;
 
     // The quoted fare came from an earlier /ride/fare-estimate call with no
     // link back to this request, so it's never trusted as-is - recompute
@@ -77,7 +92,7 @@ app.patch<{
     const now = new Date().toISOString();
     const ride: Ride = {
       id: randomUUID(),
-      riderId,
+      riderId: payload.profileId,
       source,
       destination,
       fare,
