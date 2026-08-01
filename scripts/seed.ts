@@ -71,6 +71,11 @@ async function main() {
   await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: driverUser }));
   await ddb.send(new PutCommand({ TableName: TABLES.DRIVERS, Item: driver }));
   console.log(`✅ seeded driver: ${driver.id} (${driverUser.name})`);
+
+  // @uber-clone/shared's barrel export opens a Redis connection as an
+  // import side effect (redis-client.ts), even though this script never
+  // touches it - that keeps the event loop alive forever otherwise.
+  process.exit(0);
 }
 
 main().catch((err) => {

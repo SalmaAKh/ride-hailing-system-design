@@ -8,7 +8,11 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "create-tables": "ts-node scripts/create-tables.ts",
-    "seed": "ts-node scripts/seed.ts"
+    "seed": "ts-node scripts/seed.ts",
+    "test-matching-flow": "ts-node scripts/test-matching-flow.ts",
+    "seed-load-test": "ts-node scripts/seed-load-test.ts",
+    "load-test": "ts-node scripts/load-test.ts",
+    "location-update-benchmark": "ts-node scripts/location-update-benchmark.ts"
   },
   "devDependencies": {
     "typescript": "^5.5.4",

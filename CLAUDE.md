@@ -49,8 +49,19 @@ Adapted from a "Design Uber" system design interview breakdown.
 - `GET /location/nearby-drivers?lat=&long=&radiusKm=` → `{ driverIds: string[] }`
   (no auth - read-only, called internally by `matching-service`, not scoped
   to any particular user's identity; GEOSEARCH, nearest-first)
-- `PATCH /ride/driver/accept` → `{ rideId, accept: boolean }`
-- `PATCH /ride/driver/update` → `{ rideId, status: 'pickedup' | 'droppedoff' }`
+- `PATCH /ride/driver/accept` → `Authorization: Bearer <token>` + `{ rideId, accept: boolean }`
+  → `{ pickup: Coordinates }` on accept, `{ declined: true }` on decline
+  (lives in `ride-service`, not `matching-service` - it's a `Ride`/`Driver`
+  status transition, which `ride-service` already owns; verifies the
+  calling driver actually holds the current `driver-lock` for this ride
+  before doing anything, and on decline releases that lock early rather
+  than waiting out its TTL)
+- `PATCH /ride/driver/update` → `Authorization: Bearer <token>` + `{ rideId, status: 'picked_up' | 'dropped_off' }`
+  (also `ride-service`; requires `Ride.driverId` match the token; on
+  `dropped_off` also sets `Driver.status` back to `available`)
+- `POST /notify` (`notification-service`) → `{ driverId, rideId }` → `{ notified: true }`
+  (stub - logs only, no real push integration (APNs/FCM) yet; that's a
+  separate integration this project isn't about)
 
 **High-level architecture:** API Gateway → Ride Service (fare estimate,
 talks to a 3rd-party mapping API) → Ride Request Queue → Ride Matching
@@ -82,9 +93,46 @@ never in DynamoDB.
   known so far. New GSIs should only be added when a real query pattern
   demands one — flag it and explain the pattern before adding it.
 - Redis holds driver locations (via `GEOADD`/`GEOSEARCH` — geohashing was
-  flagged as new/unfamiliar, so explain these commands when first used)
-  and per-driver TTL locks (used by the matching loop to guarantee a
-  driver is never sent two ride requests at once).
+  flagged as new/unfamiliar, so explain these commands when first used),
+  per-driver TTL locks (`driver-lock:<driverId>`, `SET NX EX` — guarantees
+  a driver is never sent two ride requests at once), per-driver heartbeats
+  (`driver-heartbeat:<driverId>`, 30s TTL, set alongside every location
+  update — lets the matching loop tell "actually still online" apart from
+  "DynamoDB still says available but hasn't been heard from in a while"),
+  and two queues built on blocking list ops: `ride-request-queue` (the
+  "Ride Request Queue" from the architecture doc — `ride-service` `LPUSH`es
+  a `rideId` after creating a `Ride`; `matching-service` `BRPOP`s it) and a
+  per-ride `ride-response:<rideId>` (`ride-service`'s accept/decline
+  handler `LPUSH`es the outcome; `matching-service`'s waiting loop `BLPOP`s
+  it — this is how an HTTP request in one process reaches a loop blocked
+  in a *different* process, with no shared memory between them).
+- **Blocking Redis commands need their own connection.** `BRPOP`/`BLPOP`
+  block whatever connection they're issued on until they resolve: the
+  shared `redis` client is fine for fast commands (`GET`/`SET`/`ZREM`),
+  but `matching-service`'s queue-consumer loop and each ride's wait for a
+  driver's response each use `redis.duplicate()` — otherwise one blocking
+  call (e.g. the main loop's indefinite `BRPOP`) would silently stall
+  every other command sharing that connection.
+- **Driver locations are geo-sharded into one GEO key per grid cell**
+  (`driver-locations:<latCell>:<longCell>`, ~0.1° / ~11km cells), not one
+  global key. Motivated by a back-of-envelope calculation against the
+  600k-TPS non-functional requirement: a micro-benchmark of
+  `POST /location/update` alone plateaued around ~3,000-3,800 req/s per
+  instance on this machine (Node/JWT-verification overhead, not Redis —
+  `GEOADD`/`SET` are cheap), implying ~150-220 instances needed at 600k
+  TPS, all of which would hammer one Redis key/node under the old design.
+  Sharding by cell distributes that load. Two things this requires to stay
+  correct, both easy to miss: `GET /location/nearby-drivers` queries the
+  3x3 neighborhood of cells around the search point (cell size is
+  deliberately bigger than the 5km search radius so this is always
+  enough), merging and re-sorting by distance (`WITHDIST`) since "nearest
+  first" only holds within one key's results, not across nine merged
+  ones; and `POST /location/update` tracks each driver's current cell in
+  `driver-cell:<driverId>` so it can `ZREM` them from their *previous*
+  cell when they move to a new one — otherwise a moved driver would
+  persist as a stale candidate at their old location, and the existing
+  heartbeat/status staleness check wouldn't catch it, since both stay
+  fresh regardless of which cell gets written to.
 - **Auth**: a `Users` table (PK: `email`, since that's the login lookup)
   holds credentials, separate from the `Riders`/`Drivers` profile tables —
   keeps password hashes away from anywhere a Rider/Driver object gets
@@ -132,31 +180,41 @@ Done:
    location - no consumer needs staleness filtering yet, so this is
    deferred to `matching-service`, likely via a companion per-driver key
    with its own TTL.
-5. `packages/matching-service` — **first slice only**, not the full
-   matching flow. `ride-service` now `LPUSH`es a `rideId` onto Redis's
-   `ride-request-queue` after creating a `Ride` (the "Ride Request Queue"
-   from the architecture doc - decouples ride creation from matching).
-   `matching-service` is a background worker (no HTTP server yet, nothing
-   calls it) that `BRPOP`s that queue, calls `location-service`'s new
-   `GET /location/nearby-drivers` (GEOSEARCH), filters candidates to
-   `status === 'available'`, and attempts an atomic
-   `SET driver-lock:<driverId> <rideId> NX EX 10` on the first available
-   one. Stops there - just proves queue → search → availability → lock
-   works. Explicitly NOT built yet: sending a real notification, waiting
-   for accept/decline, retrying the next candidate on timeout/decline,
-   and updating `Ride`/`Driver` status on a match.
+5. `packages/matching-service` — full matching loop, not just the queue
+   → search → lock slice from before. Per ride: pops from
+   `ride-request-queue`, finds nearby available+live drivers, locks the
+   first candidate, calls `notification-service`, then `BLPOP`s
+   `ride-response:<rideId>` (own Redis connection - see the blocking-
+   connection note above) for up to the lock's 10s TTL. Accepted → done.
+   Declined or timed out → tries the next candidate. Runs multiple rides
+   concurrently (the main loop doesn't `await` `processRideRequest`, so
+   one slow match doesn't block others). If no driver accepts within a
+   60s budget (the "< 1 minute to match or fail" non-functional
+   requirement) or candidates run out, sets `Ride.status → 'unmatched'`
+   (a new status, distinct from rider-initiated `'cancelled'`). Resolves
+   the driver-location-staleness gap from step 4: a candidate only counts
+   as live if DynamoDB says `available` *and* has a recent
+   `driver-heartbeat:<driverId>` key (30s TTL, set by `/location/update`)
+   — either check failing lazily `ZREM`s them from `driver-locations`
+   right there, no separate sweep job.
+6. `packages/ride-service` — `PATCH /ride/driver/accept` and
+   `PATCH /ride/driver/update`, closing the loop matching-service started.
+   Accept verifies the driver holds the ride's current lock, updates
+   `Ride`/`Driver` status, and `LPUSH`es the outcome onto
+   `ride-response:<rideId>` so the waiting matching loop (a *different*
+   process) picks it up immediately instead of idling out the TTL.
+7. `packages/notification-service` — stub, as planned: one endpoint,
+   logs and returns 200. No real push integration yet.
 
-## Immediate next steps (in order)
+## Immediate next steps
 
-1. The rest of `matching-service`: `PATCH /ride/driver/accept` (which
-   service owns it - probably `matching-service`, since it holds the
-   lock), how an accept reaches the *waiting* matching loop (a blocking
-   10s wait inside a request handler doesn't fit Node's model well -
-   likely polling or an in-process event emitter keyed by `rideId`),
-   retry-next-candidate on decline/timeout, and updating
-   `Ride.status → 'matched'` / `Driver.status → 'in_ride'` on success.
-   The driver-location-staleness question flagged above belongs here too.
-2. `notification-service` (can likely stay a stub/log for a while).
+The core loop described in the system design (fare estimate → request →
+match → accept → pickup/drop-off) is now complete end to end. Nothing
+specific is queued next — natural candidates to pick up when there's a
+reason to: notifying the *rider* when matched (right now only the driver
+gets `/notify`'d), a real `notification-service` integration, the
+single-table DynamoDB refactor (deliberately deferred per the stack
+decisions above), or tests.
 
 Confirm scope with me before jumping ahead of step in progress.
 

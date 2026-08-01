@@ -60,7 +60,9 @@ export type RideStatus =
   | 'picked_up'
   | 'dropped_off'
   | 'completed'
-  | 'cancelled';
+  | 'cancelled' // rider (or system) actively cancelled
+  | 'unmatched'; // matching gave up after its time budget - distinct from
+  // 'cancelled', which implies someone actively cancelled it
 
 export interface Ride {
   id: string;
@@ -75,6 +77,7 @@ export interface Ride {
   matchedAt?: string;
   pickedUpAt?: string;
   droppedOffAt?: string;
+  completedAt?: string;
   createdAt: string;
 }
 
