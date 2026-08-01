@@ -7,7 +7,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "create-tables": "ts-node scripts/create-tables.ts"
+    "create-tables": "ts-node scripts/create-tables.ts",
+    "seed": "ts-node scripts/seed.ts"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
