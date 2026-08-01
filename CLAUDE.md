@@ -43,7 +43,9 @@ Adapted from a "Design Uber" system design interview breakdown.
   (deviates from the original `{ rideId } → 200` spec — `riderId` comes from
   the verified token, never the body; fare is recomputed server-side and
   `fareChanged` flags if it differs from the quoted value)
-- `POST /location/update` → `{ lat, long }`
+- `POST /location/update` → `Authorization: Bearer <token>` + `{ lat, long }` → `{ driverId, lat, long }`
+  (`driverId` comes from the verified token, same pattern as `/ride/request`;
+  GEOADDs into Redis's `driver-locations` key, no DynamoDB involved)
 - `PATCH /ride/driver/accept` → `{ rideId, accept: boolean }`
 - `PATCH /ride/driver/update` → `{ rideId, status: 'pickedup' | 'droppedoff' }`
 
@@ -119,12 +121,20 @@ Done:
    roles - `name`, `email`, `phone`, credentials; `Riders`/`Drivers` hold
    only `userId` + role-specific fields (`paymentMethods` /
    `vehicle`+`status`) + their own `createdAt`.
+4. `packages/location-service` — `POST /location/update`, first real
+   Redis usage. `GEOADD`s into a single `driver-locations` key (one key
+   so `GEOSEARCH` can scan across every driver later). Known gap, left
+   for deliberately later: Redis GEO sets can't expire individual members,
+   so a driver who goes offline just stays in the set with a stale
+   location - no consumer needs staleness filtering yet, so this is
+   deferred to `matching-service`, likely via a companion per-driver key
+   with its own TTL.
 
 ## Immediate next steps (in order)
 
-1. `location-service` + Redis GEO usage (the geohashing lesson).
-2. `matching-service` + the TTL driver-lock consistency logic.
-3. `notification-service` (can likely stay a stub/log for a while).
+1. `matching-service` + the TTL driver-lock consistency logic (and the
+   driver-location-staleness question flagged above).
+2. `notification-service` (can likely stay a stub/log for a while).
 
 Confirm scope with me before jumping ahead of step in progress.
 
